@@ -1,3 +1,7 @@
+This fork adds possibility to login to html form before scraping. I'm calling it prelogin. See updated example configuration below.
+
+
+
 # HA MultiScrape custom component
 This Home Assistant custom component can scrape multiple fields (using CSS selectors) from a single http request (the existing scrape sensor can scrape a single field only).
 
@@ -29,6 +33,14 @@ Via HACS as a custom repository (https://github.com/danieldotnl/hass-multiscrape
       releasedate:
         name: Release date
         select: '.release-date'
+    prelogin:
+      preloginpage: https://url.of.that.site.com/login.html
+      preloginform: 'loginForm'
+      username_field: 'username'
+      password_field: 'password'
+      username: 'yourusername'
+      password: 'yourpassword'
+
 ```
 ### Roadmap
 - create a separate sensor for each field instead of attributes
