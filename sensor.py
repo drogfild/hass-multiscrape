@@ -221,7 +221,6 @@ class MultiscrapeSensor(Entity):
         return self._force_update
 
     def update(self):
-
         # TODO: Make logic to detect when already logged in. Now if loginform not found assumes we are logged in.
         if self._prelogin:
             _LOGGER.debug("Prelogin started")
@@ -238,18 +237,26 @@ class MultiscrapeSensor(Entity):
 
             # TODO: value is only used to debug :(
             value = self.rest.data
-            #_LOGGER.debug("Prelogin page fetched from resource: %s", value[:35000])
+            _LOGGER.debug("Prelogin page fetched from resource: %s", value[:35000])
             result = BeautifulSoup(self.rest.data, self._parser)
 
-            # Find all fields and extract them to formdata
-            # 
+            # Look for the login form checking these attributes for a match in order: 'name', 'id', 'class', 'action'.
             form = result.find('form', attrs={'name':self._prelogin[CONF_PRELOGINFORM]})
+            if form is None:
+                form = result.find('form', attrs={'id':self._prelogin[CONF_PRELOGINFORM]})
+            if form is None:
+                form = result.find('form', attrs={'class':self._prelogin[CONF_PRELOGINFORM]})
+            if form is None:
+                form = result.find('form', attrs={'action':self._prelogin[CONF_PRELOGINFORM]})
+
             if form is None:
                 _LOGGER.debug("Unable to find form with name %s, assume we are already logged in", self._prelogin[CONF_PRELOGINFORM])
             
             else:
 
-                fields = result.find('form', attrs={'name':self._prelogin[CONF_PRELOGINFORM]}).findAll('input')
+                # Find all fields and extract them to formdata
+                # 
+                fields = form.findAll('input')
                 formdata = dict( (field.get('name'), field.get('value')) for field in fields)
 
                 # Get username and password from config
@@ -264,7 +271,7 @@ class MultiscrapeSensor(Entity):
 
                 # TODO: value is only used to debug :(
                 value = self.rest.data
-                #_LOGGER.debug("Prelogin page fetched after login from resource: %s", value[:2500])
+                _LOGGER.debug("Prelogin page fetched after login from resource: %s", value[:2500])
 
 
             # Set url back to normal
@@ -286,14 +293,14 @@ class MultiscrapeSensor(Entity):
             return
         
         value = self.rest.data
-        #_LOGGER.debug("Data fetched from resource: %s", value)
+        _LOGGER.info("Data fetched from resource: %s", value)
         
         if self._selectors:
         
             result = BeautifulSoup(self.rest.data, self._parser)
             result.prettify()
             #_LOGGER.debug("Data parsed by BeautifulSoup: %s", result)
-        
+
             self._attributes = {}
             if value:
             
