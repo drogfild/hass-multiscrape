@@ -221,6 +221,7 @@ class MultiscrapeSensor(Entity):
         return self._force_update
 
     def update(self):
+
         # TODO: Make logic to detect when already logged in. Now if loginform not found assumes we are logged in.
         if self._prelogin:
             _LOGGER.debug("Prelogin started")
@@ -232,12 +233,12 @@ class MultiscrapeSensor(Entity):
             self.rest.update()
 
             if self.rest.data is None:
-                _LOGGER.error("Unable to retrieve prelogin data for %s", self._name)
+                #_LOGGER.error("Unable to retrieve prelogin data for %s", self._name)
                 return
 
             # TODO: value is only used to debug :(
             value = self.rest.data
-            _LOGGER.debug("Prelogin page fetched from resource: %s", value[:35000])
+            #_LOGGER.debug("Prelogin page fetched from resource: %s", value[:35000])
             result = BeautifulSoup(self.rest.data, self._parser)
 
             # Look for the login form checking these attributes for a match in order: 'name', 'id', 'class', 'action'.
@@ -271,7 +272,7 @@ class MultiscrapeSensor(Entity):
 
                 # TODO: value is only used to debug :(
                 value = self.rest.data
-                _LOGGER.debug("Prelogin page fetched after login from resource: %s", value[:2500])
+                #_LOGGER.debug("Prelogin page fetched after login from resource: %s", value[:2500])
 
 
             # Set url back to normal
@@ -279,7 +280,7 @@ class MultiscrapeSensor(Entity):
             # TODO: Set method back to original
             #self.rest._method = self.method
             self.rest._method = previousmethod
-            _LOGGER.debug("Prelogin ended")
+            #_LOGGER.debug("Prelogin ended")
 
         else:
             # If not prelogin do normal fetch
