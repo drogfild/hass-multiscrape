@@ -233,7 +233,7 @@ class MultiscrapeSensor(Entity):
             self.rest.update()
 
             if self.rest.data is None:
-                #_LOGGER.error("Unable to retrieve prelogin data for %s", self._name)
+                _LOGGER.error("Unable to retrieve prelogin data for %s", self._name)
                 return
 
             # TODO: value is only used to debug :(
@@ -280,7 +280,7 @@ class MultiscrapeSensor(Entity):
             # TODO: Set method back to original
             #self.rest._method = self.method
             self.rest._method = previousmethod
-            #_LOGGER.debug("Prelogin ended")
+            _LOGGER.debug("Prelogin ended")
 
         else:
             # If not prelogin do normal fetch
@@ -294,7 +294,7 @@ class MultiscrapeSensor(Entity):
             return
         
         value = self.rest.data
-        _LOGGER.info("Data fetched from resource: %s", value)
+        #_LOGGER.debug("Data fetched from resource: %s", value)
         
         if self._selectors:
         
