@@ -2,29 +2,35 @@
 import logging
 from xml.parsers.expat import ExpatError
 
-import homeassistant.helpers.config_validation as cv
+from bs4 import BeautifulSoup
+import requests
+from requests import Session
+from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 import voluptuous as vol
 import xmltodict
-import asyncio
-import aiohttp
-import async_timeout
-import sys 
-import socket
-from bs4 import BeautifulSoup
+
 from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (CONF_AUTHENTICATION, CONF_FORCE_UPDATE,
-                                 CONF_HEADERS, CONF_METHOD, CONF_NAME,
-                                 CONF_PASSWORD, CONF_PAYLOAD, CONF_RESOURCE,
-                                 CONF_RESOURCE_TEMPLATE, CONF_TIMEOUT,
-                                 CONF_UNIT_OF_MEASUREMENT, CONF_USERNAME,
-                                 CONF_VALUE_TEMPLATE, CONF_VERIFY_SSL,
-                                 HTTP_BASIC_AUTHENTICATION,
-                                 HTTP_DIGEST_AUTHENTICATION)
+from homeassistant.const import (
+    CONF_AUTHENTICATION,
+    CONF_FORCE_UPDATE,
+    CONF_HEADERS,
+    CONF_METHOD,
+    CONF_NAME,
+    CONF_PASSWORD,
+    CONF_PAYLOAD,
+    CONF_RESOURCE,
+    CONF_RESOURCE_TEMPLATE,
+    CONF_TIMEOUT,
+    CONF_UNIT_OF_MEASUREMENT,
+    CONF_USERNAME,
+    CONF_VALUE_TEMPLATE,
+    CONF_VERIFY_SSL,
+    HTTP_BASIC_AUTHENTICATION,
+    HTTP_DIGEST_AUTHENTICATION,
+)
 from homeassistant.exceptions import PlatformNotReady
+import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from datetime import timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,17 +40,23 @@ DEFAULT_VERIFY_SSL = True
 DEFAULT_FORCE_UPDATE = False
 DEFAULT_TIMEOUT = 10
 DEFAULT_PARSER = "lxml"
-DEFAULT_SCAN_INTERVAL = 30
 
 CONF_SELECTORS = "selectors"
 CONF_ATTR = "attribute"
 CONF_SELECT = "select"
 CONF_INDEX = "index"
 CONF_PARSER = "parser"
-CONF_SCAN_INTERVAL = "scan_interval"
 
-CONF_SELECTORS = "selectors"
-METHODS = ["POST", "GET", "PUT"]
+# OT 19.8.2020 Add prelogin parameters
+CONF_PRELOGIN = "prelogin"
+CONF_PRELOGINPAGE = "preloginpage"
+CONF_PRELOGINFORM = "preloginform"
+CONF_USERNAMEFIELD = "username_field"
+CONF_PASSWORDFIELD = "password_field"
+DEFAULT_USERNAMEFIELD = "username"
+DEFAULT_PASSWORDFIELD = "password"
+
+METHODS = ["POST", "GET"]
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -63,7 +75,15 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_FORCE_UPDATE, default=DEFAULT_FORCE_UPDATE): cv.boolean,
         vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): cv.positive_int,
         vol.Optional(CONF_PARSER, default=DEFAULT_PARSER): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.positive_int
+        # OT 19.8.2020
+        vol.Optional(CONF_PRELOGIN, default={}): vol.Schema({
+            vol.Required(CONF_PRELOGINPAGE): cv.url,
+            vol.Required(CONF_PRELOGINFORM): cv.string,
+            vol.Required(CONF_USERNAME): cv.string,
+            vol.Required(CONF_PASSWORD): cv.string,
+            vol.Optional(CONF_USERNAMEFIELD, default=DEFAULT_USERNAMEFIELD): cv.string,
+            vol.Optional(CONF_PASSWORDFIELD, default=DEFAULT_PASSWORDFIELD): cv.string,
+        })
     }
 )
 
@@ -83,8 +103,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {vol.Required(CONF_SELECTORS): cv.schema_with_slug_keys(SENSOR_SCHEMA)}
 )
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up the Multiscrape sensor."""
+def setup_platform(hass, config, add_entities, discovery_info=None):
+    """Set up the RESTful sensor."""
     name = config.get(CONF_NAME)
     resource = config.get(CONF_RESOURCE)
     resource_template = config.get(CONF_RESOURCE_TEMPLATE)
@@ -97,143 +117,83 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     unit = config.get(CONF_UNIT_OF_MEASUREMENT)
     value_template = config.get(CONF_VALUE_TEMPLATE)
     selectors = config.get(CONF_SELECTORS)
+    # OT 19.8.2020
+    prelogin = config.get(CONF_PRELOGIN)
     force_update = config.get(CONF_FORCE_UPDATE)
     timeout = config.get(CONF_TIMEOUT)
     parser = config.get(CONF_PARSER)
-    scan_interval = config.get(CONF_SCAN_INTERVAL)
-
-    session = async_get_clientsession(hass)
-
-    auth = None
-    if username and password:
-        auth = aiohttp.BasicAuth(username, password)
 
     if value_template is not None:
         value_template.hass = hass
 
     if resource_template is not None:
         resource_template.hass = hass
-        resource = resource_template.async_render()
+        resource = resource_template.render()
 
-    def select_values(content):
-        result = BeautifulSoup(content, parser)
-        result.prettify()
+    if username and password:
+        if config.get(CONF_AUTHENTICATION) == HTTP_DIGEST_AUTHENTICATION:
+            auth = HTTPDigestAuth(username, password)
+        else:
+            auth = HTTPBasicAuth(username, password)
+    else:
+        auth = None
+        
+    rest = RestData(method, resource, auth, headers, payload, verify_ssl, timeout)
+    rest.update()
+    
+    if rest.data is None:
+        raise PlatformNotReady
 
-        values = {}
-
-        for device, device_config in selectors.items():
-                    name = device_config.get(CONF_NAME)
-                    select = device_config.get(CONF_SELECT)
-                    attr = device_config.get(CONF_ATTR)
-                    index = device_config.get(CONF_INDEX)
-                    value_template = device_config.get(CONF_VALUE_TEMPLATE)
-
-                    try:
-                        if attr is not None:
-                            value = result.select(select)[index][attr]
-                        else:
-                            tag = result.select(select)[index]
-                            if tag.name in ("style", "script", "template"):
-                                value = tag.string
-                            else:
-                                value = tag.text
-
-                        _LOGGER.debug("Sensor %s selected: %s", name, value)
-                    except IndexError as exception:
-                        _LOGGER.error("Sensor %s was unable to extract data from HTML", name)
-                        _LOGGER.debug("Exception: %s", exception)
-                        return
-
-                    if value_template is not None:
-
-                        if value_template is not None:
-                            value_template.hass = hass
-
-                        try:
-                            values[name] = value_template.async_render_with_possible_json_value(
-                                value, None
-                            )
-                        except Exception as exception:
-                            _LOGGER.error(exception)
-                        
-                    else:
-                        values[name] = value
-
-        return values
-
-    async def async_update_data():
-        """Fetch data from API endpoint.
-
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
-        """
-        try:
-            # Note: asyncio.TimeoutError and aiohttp.ClientError are already
-            # handled by the data update coordinator.
-            async with async_timeout.timeout(timeout):
-                 async with session.request(
-                    method,
-                    resource,
-                    auth=auth,
-                    data=payload,
-                    headers=headers,
-                    ssl=verify_ssl,
-                ) as response:
-                    result = await response.text()
-                    return select_values(result)
-        except Exception:
-            raise PlatformNotReady
-
-    coordinator = DataUpdateCoordinator(
-        hass,
-        _LOGGER,
-        # Name of the data. For logging purposes.
-        name="multiscrape",
-        update_method=async_update_data,
-        # Polling interval. Will only be polled if there are subscribers.
-        update_interval=timedelta(seconds=scan_interval),
+    # Must update the sensor now (including fetching the rest resource) to
+    # ensure it's updating its state.
+    add_entities(
+        [
+            MultiscrapeSensor(
+                hass,
+                rest,
+                name,
+                unit,
+                value_template,
+                selectors,
+                force_update,
+                resource_template,
+                parser,
+                prelogin, # OT 19.8.2020
+            )
+        ],
+        True,
     )
 
-    # Fetch initial data so we have data when entities subscribe
-    await coordinator.async_refresh()
-
-    entities = []
-
-    for device, device_config in selectors.items():
-                    name = device_config.get(CONF_NAME)
-                    unit = device_config.get(CONF_UNIT_OF_MEASUREMENT)
-
-                    entities.append(MultiscrapeSensor(
-                                        hass,
-                                        coordinator,
-                                        name,
-                                        unit,
-                                        force_update,
-                                    )
-                    )                    
-
-    async_add_entities(entities, True)
 
 class MultiscrapeSensor(Entity):
-    """Implementation of the Multiscrape sensor."""
+    """Implementation of a REST sensor."""
 
     def __init__(
         self,
         hass,
-        coordinator,
+        rest,
         name,
         unit_of_measurement,
-        force_update
+        value_template,
+        selectors,
+        force_update,
+        resource_template,
+        parser,
+        prelogin, # OT 19.8.2020
     ):
         """Initialize the sensor."""
         self._hass = hass
-        self.coordinator = coordinator
+        self.rest = rest
         self._name = name
         self._state = None
         self._unit_of_measurement = unit_of_measurement
+        self._value_template = value_template
+        self._selectors = selectors
+        self._attributes = None
         self._force_update = force_update
-
-        self._attributes = {}
+        self._resource_template = resource_template
+        self._parser = parser
+        self._prelogin = prelogin # OT 19.8.2020
 
     @property
     def name(self):
@@ -247,40 +207,188 @@ class MultiscrapeSensor(Entity):
 
     @property
     def available(self):
-        """Return if entity is available."""
-        return self.coordinator.last_update_success
+        """Return if the sensor data are available."""
+        return self.rest.data is not None
 
     @property
     def state(self):
         """Return the state of the device."""
-        return self.coordinator.data[self._name]
+        return self._state
 
     @property
     def force_update(self):
         """Force update."""
         return self._force_update
 
-    @property
-    def should_poll(self):
-        """No need to poll. Coordinator notifies entity of updates."""
-        return False
-    
-    async def async_added_to_hass(self):
-        """When entity is added to hass."""
-        self.async_on_remove(
-            self.coordinator.async_add_listener(
-                self.async_write_ha_state
-            )
-        )
-    
-    async def async_update(self):
-        """Update the entity.
+    def update(self):
 
-        Only used by the generic entity update service.
-        """
-        await self.coordinator.async_request_refresh()
-    
+        # TODO: Make logic to detect when already logged in. Now if loginform not found assumes we are logged in.
+        if self._prelogin:
+            _LOGGER.debug("Prelogin started")
+            _LOGGER.debug("Preloginpage: %s", self._prelogin[CONF_PRELOGINPAGE])
+
+            previousmethod = self.rest._method
+
+            self.rest.set_url(self._prelogin[CONF_PRELOGINPAGE])
+            self.rest.update()
+
+            if self.rest.data is None:
+                _LOGGER.error("Unable to retrieve prelogin data for %s", self._name)
+                return
+
+            # TODO: value is only used to debug :(
+            value = self.rest.data
+            #_LOGGER.debug("Prelogin page fetched from resource: %s", value[:35000])
+            result = BeautifulSoup(self.rest.data, self._parser)
+
+            # Find all fields and extract them to formdata
+            # 
+            form = result.find('form', attrs={'name':self._prelogin[CONF_PRELOGINFORM]})
+            if form is None:
+                _LOGGER.debug("Unable to find form with name %s, assume we are already logged in", self._prelogin[CONF_PRELOGINFORM])
+            
+            else:
+
+                fields = result.find('form', attrs={'name':self._prelogin[CONF_PRELOGINFORM]}).findAll('input')
+                formdata = dict( (field.get('name'), field.get('value')) for field in fields)
+
+                # Get username and password from config
+                formdata[self._prelogin[CONF_USERNAMEFIELD]] = self._prelogin[CONF_USERNAME]
+                formdata[self._prelogin[CONF_PASSWORDFIELD]] = self._prelogin[CONF_PASSWORD]
+
+                # Set form data to rest request and post it
+                self.rest.set_request_data(formdata)
+                # Method is read from the form
+                self.rest._method = form['method']
+                self.rest.update()
+
+                # TODO: value is only used to debug :(
+                value = self.rest.data
+                #_LOGGER.debug("Prelogin page fetched after login from resource: %s", value[:2500])
+
+
+            # Set url back to normal
+            #self.rest.set_url(self._resource_template.render())
+            # TODO: Set method back to original
+            #self.rest._method = self.method
+            self.rest._method = previousmethod
+            _LOGGER.debug("Prelogin ended")
+
+        else:
+            # If not prelogin do normal fetch
+            if self._resource_template is not None:
+                self.rest.set_url(self._resource_template.render())
+
+            self.rest.update()
+        
+        if self.rest.data is None:
+            _LOGGER.error("Unable to retrieve data for %s", self._name)
+            return
+        
+        value = self.rest.data
+        #_LOGGER.debug("Data fetched from resource: %s", value)
+        
+        if self._selectors:
+        
+            result = BeautifulSoup(self.rest.data, self._parser)
+            result.prettify()
+            #_LOGGER.debug("Data parsed by BeautifulSoup: %s", result)
+        
+            self._attributes = {}
+            if value:
+            
+                for device, device_config in self._selectors.items():
+                    name = device_config.get(CONF_NAME)
+                    select = device_config.get(CONF_SELECT)
+                    attr = device_config.get(CONF_ATTR)
+                    index = device_config.get(CONF_INDEX)
+                    value_template = device_config.get(CONF_VALUE_TEMPLATE)
+                    unit = device_config.get(CONF_UNIT_OF_MEASUREMENT)
+                    
+                    try:
+                        if attr is not None:
+                            value = result.select(select)[index][attr]
+                        else:
+                            tag = result.select(select)[index]
+                            if tag.name in ("style", "script", "template"):
+                                value = tag.string
+                            else:
+                                value = tag.text
+                        
+                        _LOGGER.debug("Sensor %s selected: %s", name, value)
+                    except IndexError as e:
+                        _LOGGER.error("Sensor %s was unable to extract data from HTML", name)
+                        _LOGGER.debug("Exception: %s", e)
+                        continue
+
+                    if value_template is not None:
+                    
+                        if value_template is not None:
+                            value_template.hass = self._hass
+                            
+                        self._attributes[name] = value_template.render_with_possible_json_value(
+                            value, None
+                        )
+                    else:
+                        self._attributes[name] = value
+
+        self._state = "None"
+        # OT 21.8.2020
+        # TODO: last update would be nice
+        #self._attributes['updated'] 
+
     @property
     def device_state_attributes(self):
         """Return the state attributes."""
         return self._attributes
+
+
+class RestData:
+    """Class for handling the data retrieval."""
+
+    def __init__(
+        self, method, resource, auth, headers, data, verify_ssl, timeout=DEFAULT_TIMEOUT
+    ):
+        """Initialize the data object."""
+        self._method = method
+        self._resource = resource
+        self._auth = auth
+        self._headers = headers
+        self._request_data = data
+        self._verify_ssl = verify_ssl
+        self._timeout = timeout
+        self._http_session = Session()
+        self.data = None
+        self.headers = None
+
+    def __del__(self):
+        """Destroy the http session on destroy."""
+        self._http_session.close()
+
+    def set_url(self, url):
+        """Set url."""
+        self._resource = url
+
+    def set_request_data(self, request_data):
+        """Set request data."""
+        self._request_data = request_data
+
+    def update(self):
+        """Get the latest data from REST service with provided method."""
+        _LOGGER.debug("Updating from %s", self._resource)
+        try:
+            response = self._http_session.request(
+                self._method,
+                self._resource,
+                headers=self._headers,
+                auth=self._auth,
+                data=self._request_data,
+                timeout=self._timeout,
+                verify=self._verify_ssl,
+            )
+            self.data = response.text
+            self.headers = response.headers
+        except requests.exceptions.RequestException as ex:
+            _LOGGER.error("Error fetching data: %s failed with %s", self._resource, ex)
+            self.data = None
+            self.headers = None
