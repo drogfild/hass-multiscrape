@@ -1,5 +1,5 @@
 ### This fork adds possibility to login to html form before scraping. I'm calling it prelogin. See updated example configuration below.
-
+For more info about multipscrape see original author https://github.com/danieldotnl/hass-multiscrape
 
 
 # HA MultiScrape custom component
