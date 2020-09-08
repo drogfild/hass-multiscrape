@@ -36,4 +36,5 @@ Most properties of the Rest and Scrape sensor apply.
 
 ```
 ### Roadmap for this fork
-- test test test
+- Build prelogin again
+- Decide if this should be named like "form-fill" instead of "prelogin"
