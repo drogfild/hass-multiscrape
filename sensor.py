@@ -83,7 +83,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_FORCE_UPDATE, default=DEFAULT_FORCE_UPDATE): cv.boolean,
         vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): cv.positive_int,
         vol.Optional(CONF_PARSER, default=DEFAULT_PARSER): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.time_period
+        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.time_period,
         # OT 19.8.2020
         vol.Optional(CONF_PRELOGIN, default={}): vol.Schema({
             vol.Required(CONF_PRELOGINPAGE): cv.url,
@@ -98,7 +98,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 
 SENSOR_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_SELECT): cv.string,
+        vol.Required(CONF_SELECT): cv.template,
         vol.Optional(CONF_ATTR): cv.string,
         vol.Optional(CONF_INDEX, default=0): cv.positive_int,
         vol.Required(CONF_NAME): cv.string,
@@ -112,8 +112,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {vol.Required(CONF_SELECTORS): cv.schema_with_slug_keys(SENSOR_SCHEMA)}
 )
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the RESTful sensor."""
+async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+    """Set up the Multiscrape sensor."""
     name = config.get(CONF_NAME)
     resource = config.get(CONF_RESOURCE)
     resource_template = config.get(CONF_RESOURCE_TEMPLATE)
@@ -124,17 +124,20 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     password = config.get(CONF_PASSWORD)
     headers = config.get(CONF_HEADERS)
     unit = config.get(CONF_UNIT_OF_MEASUREMENT)
-    value_template = config.get(CONF_VALUE_TEMPLATE)
     selectors = config.get(CONF_SELECTORS)
     # OT 19.8.2020
     prelogin = config.get(CONF_PRELOGIN)
     force_update = config.get(CONF_FORCE_UPDATE)
     timeout = config.get(CONF_TIMEOUT)
     parser = config.get(CONF_PARSER)
+    scan_interval = config.get(CONF_SCAN_INTERVAL)
 
-    if value_template is not None:
-        value_template.hass = hass
+    session = async_get_clientsession(hass)
 
+    auth = None
+    if username and password:
+        auth = aiohttp.BasicAuth(username, password)
+        
     if resource_template is not None:
         resource_template.hass = hass
         resource = resource_template.async_render()
@@ -153,6 +156,10 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
             index = device_config.get(CONF_INDEX)
             value_template = device_config.get(CONF_VALUE_TEMPLATE)
 
+            if select is not None:
+                select.hass = hass
+                select = select.async_render()
+
             try:
                 if attr is not None:
                     value = result.select(select)[index][attr]
@@ -170,9 +177,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
                 return
 
             if value_template is not None:
-
-                if value_template is not None:
-                    value_template.hass = hass
+                value_template.hass = hass
 
                 try:
                     values[key] = value_template.async_render_with_possible_json_value(
@@ -193,22 +198,106 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         so entities can quickly look up their data.
         """
         try:
-            # Note: asyncio.TimeoutError and aiohttp.ClientError are already
-            # handled by the data update coordinator.
-            async with async_timeout.timeout(timeout):
-                async with session.request(
-                    method,
-                    resource,
-                    auth=auth,
-                    data=payload,
-                    headers=headers,
-                    ssl=verify_ssl,
-                ) as response:
-                    result = await response.text()
-                    _LOGGER.debug("Response from %s: \n %s", resource, response)
-                    return select_values(result)
+
+            # TODO: Make logic to detect when already logged in. Now if loginform not found assumes we are logged in.
+            if prelogin:
+                _LOGGER.debug("Prelogin started")
+                _LOGGER.debug("Preloginpage: %s", prelogin[CONF_PRELOGINPAGE])
+
+                preresource=prelogin[CONF_PRELOGINPAGE]
+                _LOGGER.debug("Prelogin log point 1")
+                async with async_timeout.timeout(timeout):
+                    async with session.request(
+                        method,
+                        preresource,
+                        auth=auth,
+                        data=payload,
+                        headers=headers,
+                        ssl=verify_ssl,
+                    ) as preresponse:
+                        preresult = await preresponse.text()
+                        _LOGGER.debug("PRE Response from %s", preresource)
+                        # return select_values(preresult)
+
+                #_LOGGER.debug("Prelogin page fetched from resource: %s", preresult[:35000])
+                #result = BeautifulSoup(self.rest.data, self._parser)
+                result = BeautifulSoup(preresult, parser)
+                result.prettify()
+
+                # Look for the login form checking these attributes for a match in order: 'name', 'id', 'class', 'action'.
+                form = result.find('form', attrs={'name':prelogin[CONF_PRELOGINFORM]})
+                if form is None:
+                    form = result.find('form', attrs={'id':prelogin[CONF_PRELOGINFORM]})
+                if form is None:
+                    form = result.find('form', attrs={'class':prelogin[CONF_PRELOGINFORM]})
+                if form is None:
+                    form = result.find('form', attrs={'action':prelogin[CONF_PRELOGINFORM]})
+
+                if form is None:
+                    _LOGGER.debug("Unable to find form with name %s, assume we are already logged in", prelogin[CONF_PRELOGINFORM])
+                    return select_values(preresult)
+
+                else:
+
+                    # Find all fields and extract them to formdata
+                    # 
+                    fields = form.findAll('input')
+                    formdata = dict( (field.get('name'), field.get('value')) for field in fields)
+
+                    # Get username and password from config
+                    formdata[prelogin[CONF_USERNAMEFIELD]] = prelogin[CONF_USERNAME]
+                    formdata[prelogin[CONF_PASSWORDFIELD]] = prelogin[CONF_PASSWORD]
+
+                    _LOGGER.debug("PrePrelogin Formdata %s", formdata)
+
+                    _LOGGER.debug("PrePrelogin login action")
+                    async with async_timeout.timeout(timeout):
+                        async with session.request(
+                            form['method'],  # Get method from the form
+                            preresource,
+                            auth=auth,
+                            data=formdata,  # This is the magic
+                            headers=headers,
+                            ssl=verify_ssl,
+                        ) as preresponse:
+                            preresult = await preresponse.text()
+                            _LOGGER.debug("PRE login Response from %s", preresource)
+                            #_LOGGER.debug("Prelogin page fetched after login from resource: %s", preresult[:2500])
+                            return select_values(preresult)
+
+                    # Test if we can just inject form data to the payload of original script
+                    #payload=formdata  # Didn't work?
+
+                    # Set form data to rest request and post it
+                    #self.rest.set_request_data(formdata)
+                    # Method is read from the form
+                    #self.rest._method = form['method']
+                    #self.rest.update()
+
+                    # TODO: value is only used to debug :(
+                    #value = self.rest.data
+                    #_LOGGER.debug("Prelogin page fetched after login from resource: %s", value[:2500])
+
+                _LOGGER.debug("Prelogin ended")
+
+            else:
+
+                # Note: asyncio.TimeoutError and aiohttp.ClientError are already
+                # handled by the data update coordinator.
+                async with async_timeout.timeout(timeout):
+                    async with session.request(
+                        method,
+                        resource,
+                        auth=auth,
+                        data=payload,
+                        headers=headers,
+                        ssl=verify_ssl,
+                    ) as response:
+                        result = await response.text()
+                        _LOGGER.debug("Response from %s: \n %s", resource, response)
+                        return select_values(result)
         except Exception:
-            raise PlatformNotReady
+            raise UpdateFailed
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -241,6 +330,9 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 
     async_add_entities(entities, True)
 
+class UpdateFailed(Exception):
+    """Raised when an update has failed."""
+
 class MultiscrapeSensor(Entity):
     """Implementation of the Multiscrape sensor."""  
     
@@ -251,12 +343,8 @@ class MultiscrapeSensor(Entity):
         key,
         name,
         unit_of_measurement,
-        value_template,
-        selectors,
-        force_update,
-        resource_template,
-        parser,
-        prelogin, # OT 19.8.2020
+        force_update
+#        prelogin, # OT 19.8.2020
     ):
         """Initialize the sensor."""
         self._hass = hass
@@ -265,13 +353,10 @@ class MultiscrapeSensor(Entity):
         self._name = name
         self._state = None
         self._unit_of_measurement = unit_of_measurement
-        self._value_template = value_template
-        self._selectors = selectors
-        self._attributes = None
         self._force_update = force_update
-        self._resource_template = resource_template
-        self._parser = parser
-        self._prelogin = prelogin # OT 19.8.2020
+#        self._prelogin = prelogin # OT 19.8.2020
+
+        self._attributes = {}
 
         self.entity_id = async_generate_entity_id(
             ENTITY_ID_FORMAT, key, hass=hass
