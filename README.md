@@ -38,3 +38,4 @@ Most properties of the Rest and Scrape sensor apply.
 ### Roadmap for this fork
 - Build prelogin again
 - Decide if this should be named like "form-fill" instead of "prelogin"
+- Example could be for https://account.nabucasa.com/ ?
