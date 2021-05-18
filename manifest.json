@@ -1,7 +1,9 @@
 {
   "domain": "multiscrape",
   "name": "MultiScrape",
-  "documentation": "https://github.com/danieldotnl/hass-multiscrape",
+  "documentation": "https://github.com/drogfild/hass-multiscrape",
   "requirements": ["lxml", "beautifulsoup4==4.9.1"],
-  "codeowners": ["@danieldotnl"]
+  "after_dependencies": ["rest"],
+  "codeowners": ["@danieldotnl","@drogfild"],
+  "version": "0.9.9"
 }
